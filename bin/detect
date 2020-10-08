@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# This is not a final buildpack
+exit 1

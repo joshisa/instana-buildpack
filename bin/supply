@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+# bin/compile <build-dir> <cache-dir> <env-dir>
+
+readonly BIN_DIR=$(cd "$(dirname "${0}")" || exit 1; pwd)
+readonly ROOT_DIR=$(dirname "${BIN_DIR}")
+readonly BUILD_DIR=$1
+readonly CACHE_DIR=$2
+readonly DEPS_DIR=$3
+readonly INDEX_DIR=$4
+readonly JQ="${BIN_DIR}/jq"
+
+set -x
+
+echo '[Instana buildpack] Stan is on the scene!'
+
+# Create startup script directory
+# The scripts inside *should* be invoked by the final buildpack
+readonly DEPENDENCIES_DIR="${DEPS_DIR}/${INDEX_DIR}"
+
+readonly PROFILE_DIR="${DEPENDENCIES_DIR}/profile.d"
+mkdir -p "${PROFILE_DIR}"
+
+cp "${ROOT_DIR}/config.yml" "${DEPENDENCIES_DIR}/config.yml"
+# Leave a trail that shows that the Instana buildpack has been involved
+# in creating the droplet
+cp "${ROOT_DIR}/version" "${DEPENDENCIES_DIR}/.instana_buildpack_version"
+
+if [ -f "${BUILD_DIR}/package.json" ]; then
+    echo "[Instana buildpack] Detected a Node.js app"
+
+    # Check if package.json already includes the '@instana/collector' package; if so, all done here
+    if "${JQ}" -e '.dependencies."@instana/collector"' < "${BUILD_DIR}/package.json" > /dev/null; then
+        readonly COLLECTOR_VERSION=$("${JQ}" -r '.dependencies."@instana/collector"' < "${BUILD_DIR}/package.json")
+        echo "[Instana buildpack] The original package.json file contains the '@instana/collector' dependency with version '${COLLECTOR_VERSION}'; nothing to do"
+    else
+        PACKAGE_VERSION='latest'
+        if [ ! -z "${INSTANA_PACKAGE_VERSION}" ]
+        then
+            PACKAGE_VERSION="${INSTANA_PACKAGE_VERSION}"
+        fi
+
+        # We patch the Instana collector dependency directly in the `package.json` file
+        echo "[Instana buildpack] Adding '@instana/collector: latest' as a dependency to the package.json file"
+        cat <<< "$(${JQ} ". + { \"dependencies\": { \"@instana/collector\" : \"${PACKAGE_VERSION}\" } }" < "${BUILD_DIR}/package.json")" > ${BUILD_DIR}/package.json
+
+        echo "[Instana buildpack] Adding '--require' via 'NODE_OPTIONS' environment variable"
+        cp "${BIN_DIR}/../scripts/profile.d/instana_nodejs.sh" "${PROFILE_DIR}/instana_environment.sh"
+        chmod +x "${PROFILE_DIR}/instana_environment.sh"
+    fi
+fi
+
+readonly REQUIREMENTS_TXT_FILE="${BUILD_DIR}/requirements.txt"
+if [ -f "${REQUIREMENTS_TXT_FILE}" ]; then
+    echo "[Instana buildpack] Detected a Python app"
+
+
+    if (grep -v '^[[:space:]]*#' | grep -q 'instana' < "${REQUIREMENTS_TXT_FILE}"); then
+        echo "[Instana buildpack] The original requirements.txt file contains the 'instana' dependency; nothing to do"
+    else
+        PACKAGE_DECLARATION='instana'
+        if [ -z "${INSTANA_PACKAGE_VERSION}" ]; then
+            PACKAGE_DECLARATION="${PACKAGE_DECLARATION}${INSTANA_PACKAGE_VERSION}"
+        fi
+
+        echo "[Instana buildpack] Adding 'instana' as a dependency to the requirements.txt file"
+        # Ensure the file ends with a newline
+        test "$(tail -c 1 "${REQUIREMENTS_TXT_FILE}")" && echo >> "${REQUIREMENTS_TXT_FILE}"
+        echo "${PACKAGE_DECLARATION}" >> "${REQUIREMENTS_TXT_FILE}"
+
+        echo "[Instana buildpack] Adding 'AUTOWRAPT_BOOTSTRAP=instana' as environment variable via the 'profile.d/${INDEX_DIR}_instana_environment.sh' script"
+        cp "${BIN_DIR}/../scripts/profile.d/instana_python.sh" "${PROFILE_DIR}/instana_environment.sh"
+        chmod +x "${PROFILE_DIR}/instana_environment.sh"
+    fi
+fi
+
+readonly GEMFILE_FILE="${BUILD_DIR}/Gemfile"
+if [ -f "${GEMFILE_FILE}" ]; then
+    echo "[Instana buildpack] Detected a Ruby app"
+
+    readonly GEM_WITHOUT_COMMENTS=$(grep -v '^[[:space:]]*#' < "${GEMFILE_FILE}")
+
+    if (echo "${GEM_WITHOUT_COMMENTS}" | grep -q "gem \'instana\'") || (echo "${GEM_WITHOUT_COMMENTS}" | grep -q 'gem "instana"')
+    then
+        echo "[Instana buildpack] The original Gemfile file contains the 'instana' dependency; nothing to do"
+    else
+        PACKAGE_DECLARATION='instana'
+        if [ -z "${INSTANA_PACKAGE_VERSION}" ]; then
+            PACKAGE_DECLARATION="'${PACKAGE_DECLARATION}', '${INSTANA_PACKAGE_VERSION}'"
+        fi
+
+        echo "[Instana buildpack] Adding 'instana' as a gem to the Gemfile file"
+        # Ensure the file ends with a newline
+        test "$(tail -c 1 "${GEMFILE_FILE}")" && echo >> "${GEMFILE_FILE}"
+        echo "gem '${PACKAGE_DECLARATION}', :source => 'https://rubygems.org'" >> "${GEMFILE_FILE}"
+    fi
+fi
+
+if ( find "${BUILD_DIR}" -name "*.dll" | grep -q . ); then
+    echo "[Instana buildpack] Detected a .NET Core app"
+    if [ -f "${BUILD_DIR}/instana_tracing/CoreProfiler.so" ]; then
+        echo "[Instana buildpack] Found the Instana CoreProfiler in the original app; nothing to in terms of dependencies"
+    else
+        echo '[Instana buildpack] Installing Instana CoreProfiler package'
+        curl -sL https://www.nuget.org/api/v2/package/Instana.Profiler.Linux.Bundled.Refs > instana.profiler.linux.bundled.refs.nupkg
+        unzip instana.profiler.linux.bundled.refs.nupkg 'contentFiles/any/any/instana_tracing/*'
+        mv contentFiles/any/any/instana_tracing "${BUILD_DIR}/instana_tracing"
+
+        echo '[Instana buildpack] Installing Instana Tracing Core package'
+        curl -sL https://www.nuget.org/api/v2/package/Instana.Tracing.Core > instana.tracing.core.nupkg
+        unzip instana.tracing.core.nupkg 'lib/netstandard2.0/*'
+        mv lib/netstandard2.0/* "${BUILD_DIR}/"
+
+        echo "[Instana buildpack] Adding the Instana DotNet Core environment variables via the 'profile.d/${INDEX_DIR}_instana_environment.sh' script"
+        cp "${BIN_DIR}/../scripts/profile.d/instana_dotnet_core.sh" "${PROFILE_DIR}/instana_environment.sh"
+        chmod u+x "${PROFILE_DIR}/instana_environment.sh"
+    fi
+fi

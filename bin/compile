@@ -1,0 +1,4 @@
+#!/bin/bash
+
+echo "The Instana buildpack is an intermediate buildpack, which adds the Instana instrumentation to some other buildpacks but cannot run any application. Are trying to use the Instana buildpack in the wrong order in your application's manifest? Try to put the Instana buildpack first, followed by a 'final' buildpack like the java_buildpack or the python_buildpack."
+exit 1
